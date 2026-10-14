@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Type checkers / linters
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Project-specific: model checkpoints and run artifacts
+models/*.pt
+models/*.pth
+models/*.ckpt
+results/*
+!results/.gitkeep
+!results/README.md
+
+!models/.gitkeep
+
+# Training logs
+runs/
+logs/
+*.log
+
+# Rendered media
+*.mp4
+*.gif
+!docs/demo.gif
