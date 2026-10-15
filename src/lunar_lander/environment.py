@@ -19,13 +19,11 @@ class Action(int, Enum):
     LEFT_THRUSTER = 4
     RIGHT_THRUSTER = 5
 
-
 class EpisodeStatus(str, Enum):
     FLYING = "flying"
     LANDED = "landed"
     CRASHED = "crashed"
     OUT_OF_BOUNDS = "out_of_bounds"
-
 
 @dataclass(frozen=True)
 class LanderConfig:
@@ -47,7 +45,9 @@ class LanderConfig:
     terrain_height: float = 520.0
 
 class LanderEnv:
-    """Physics environment with Gym-like reset/step methods."""
+    """
+    Physics environment with Gym-like reset/step methods.
+    """
 
     def __init__(self, config: LanderConfig | None = None, seed: int | None = None):
         self.config = config or LanderConfig()
@@ -181,9 +181,9 @@ class LanderEnv:
             reward += 100.0 if safe else -100.0
             done = True
 
-        if (self.position[0] < 0 or self.position[0] > c.width or self.position[1] < -20):
+        if (self.position[0] < 0 or self.position[0] > c.width or self.position[1] < 20):
             self.status = EpisodeStatus.OUT_OF_BOUNDS
-            reward -= 50.0
+            reward -= 150.0
             done = True
 
         self.total_reward += reward

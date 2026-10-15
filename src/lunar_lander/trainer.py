@@ -30,7 +30,7 @@ class TrainConfig:
     # Replay / updates
     batch_size: int = 64
     buffer_size: int = 100_000
-    warmup_steps: int = 2000          # collect this many transitions before learning
+    warmup_steps: int = 8000          # collect this many transitions before learning
     train_every: int = 1              # gradient steps per env step
 
     # Optimizer / RL
@@ -40,7 +40,7 @@ class TrainConfig:
 
     # Exploration
     epsilon_start: float = 1.0
-    epsilon_end: float = 0.05
+    epsilon_end: float = 0.1
     epsilon_decay: float = 0.995
     target_update: int = 500
 
@@ -131,6 +131,9 @@ def train(cfg: TrainConfig) -> dict:
 
             if done:
                 break
+        
+        # Decay exploration rate at the end of the episode
+        agent.end_episode()
 
         # Bookkeeping 
         success = 1 if info.get("status") == EpisodeStatus.LANDED.value else 0

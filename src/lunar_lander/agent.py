@@ -91,10 +91,13 @@ class DQNAgent:
         if self.steps % self.target_update == 0:
             self.target.load_state_dict(self.online.state_dict())
 
-        # Decay exploration rate.
-        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
         return float(loss.item())
 
+    def end_episode(self) -> None:
+        """
+        Called once per episode by the trainer to decay exploration.
+        """
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
 
     # Persistence
     def save(self, path: str) -> None:
