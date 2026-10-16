@@ -60,3 +60,5 @@ logs/
 *.mp4
 *.gif
 !docs/demo.gif
+models/seed_0/dqn_final.pt
+models/seed_0/dqn_latest.pt

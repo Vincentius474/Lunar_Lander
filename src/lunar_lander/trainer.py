@@ -10,11 +10,6 @@ from .agent import DQNAgent
 from .environment import Action, EpisodeStatus, LanderEnv, LanderConfig
 from .replay_buffer import ReplayBuffer
 
-"""
-Training loop for the DQN lander agent.
-"""
-
-
 @dataclass
 class TrainConfig:
     # Environment
@@ -50,23 +45,78 @@ class TrainConfig:
     out_dir: str = "results"
     models_dir: str = "models"
 
-def train(cfg: TrainConfig) -> dict:
-    """
-    Run a full training session. Returns the history dict.
-    """
-    # Output directories
+
+def validate_config(cfg: TrainConfig) -> None:
+    """Reject invalid configurations before training begins."""
+
+    positive_values = {
+        "episodes": cfg.episodes,
+        "max_steps": cfg.max_steps,
+        "batch_size": cfg.batch_size,
+        "buffer_size": cfg.buffer_size,
+        "warmup_steps": cfg.warmup_steps,
+        "train_every": cfg.train_every,
+        "target_update": cfg.target_update,
+        "log_every": cfg.log_every,
+        "save_every": cfg.save_every,
+        "hidden": cfg.hidden,
+    }
+
+    for name, value in positive_values.items():
+        if value <= 0:
+            raise ValueError(f"{name} must be greater than zero.")
+
+    if cfg.buffer_size < cfg.batch_size:
+        raise ValueError("buffer_size must be >= batch_size.")
+
+    if cfg.warmup_steps < cfg.batch_size:
+        raise ValueError("warmup_steps must be >= batch_size.")
+
+    if cfg.warmup_steps > cfg.buffer_size:
+        raise ValueError("warmup_steps cannot exceed buffer_size.")
+
+    if cfg.lr <= 0:
+        raise ValueError("lr must be greater than zero.")
+
+    if not 0.0 <= cfg.gamma <= 1.0:
+        raise ValueError("gamma must be between 0 and 1.")
+
+    if not (
+        0.0 <= cfg.epsilon_end <= cfg.epsilon_start <= 1.0
+    ):
+        raise ValueError(
+            "Epsilon values must satisfy "
+            "0 <= epsilon_end <= epsilon_start <= 1."
+        )
+
+    if not 0.0 < cfg.epsilon_decay <= 1.0:
+        raise ValueError("epsilon_decay must be in (0, 1].")
+
+
+def train(cfg: TrainConfig) -> dict[str, list]:
+    """Train the DQN agent and return the recorded history."""
+
+    validate_config(cfg)
+
+    # Keep experiment results and checkpoints separate by seed.
     run_dir = Path(cfg.out_dir) / f"seed_{cfg.seed}"
+    models_dir = Path(cfg.models_dir) / f"seed_{cfg.seed}"
+
     run_dir.mkdir(parents=True, exist_ok=True)
-    models_dir = Path(cfg.models_dir)
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save the config alongside the run so experiments are reproducible.
-    with open(run_dir / "config.json", "w") as f:
-        json.dump(asdict(cfg), f, indent=2)
+    config_path = run_dir / "config.json"
+    history_path = run_dir / "training_history.json"
 
-    # Env / agent / buffer
-    env = LanderEnv(seed=cfg.env_seed)
+    with config_path.open("w", encoding="utf-8") as file:
+        json.dump(asdict(cfg), file, indent=2)
+
+    # Initialize the environment and infer its observation size.
+    # env = LanderEnv(seed=cfg.env_seed)
+    env_config = LanderConfig(potential_gamma=cfg.gamma)
+    env = LanderEnv(config=env_config, seed=cfg.env_seed)
     obs = env.reset(seed=cfg.env_seed)
+
     obs_dim = obs.shape[0]
     n_actions = len(list(Action))
 
@@ -80,108 +130,166 @@ def train(cfg: TrainConfig) -> dict:
         epsilon_end=cfg.epsilon_end,
         epsilon_decay=cfg.epsilon_decay,
         target_update=cfg.target_update,
-        seed=cfg.seed
+        seed=cfg.seed,
     )
-    buffer = ReplayBuffer(capacity=cfg.buffer_size, obs_dim=obs_dim, seed=cfg.seed)
 
-    # History 
+    buffer = ReplayBuffer(
+        capacity=cfg.buffer_size,
+        obs_dim=obs_dim,
+        seed=cfg.seed,
+    )
+
     history: dict[str, list] = {
         "episode": [],
         "reward": [],
         "steps": [],
         "status": [],
+        "truncated": [],
         "epsilon": [],
         "loss": [],
         "success": [],
     }
+
     recent_rewards: list[float] = []
     recent_success: list[int] = []
 
     global_step = 0
-    t0 = time.time()
+    start_time = time.time()
 
-    # Main loop
-    for ep in range(1, cfg.episodes + 1):
-        obs = env.reset()
-        ep_reward = 0.0
-        ep_loss_sum = 0.0
-        ep_loss_count = 0
-        info: dict = {}
+    def save_history() -> None:
+        """Persist all metrics collected so far."""
+        with history_path.open("w", encoding="utf-8") as file:
+            json.dump(history, file, indent=2)
 
-        for step in range(cfg.max_steps):
-            # 1) Pick an action
-            action = agent.select_action(obs)
+    try:
+        for ep in range(1, cfg.episodes + 1):
+            # Reuse the seeded initial reset for episode 1.
+            # Subsequent resets continue the environment RNG stream.
+            if ep > 1:
+                obs = env.reset()
 
+            ep_reward = 0.0
+            ep_loss_sum = 0.0
+            ep_loss_count = 0
+            info: dict = {}
+            truncated = False
 
-            # The environment can terminate naturally, or the trainer
-            # can truncate the episode at max_steps.
-            next_obs, reward, done, info = env.step(action)
+            for step in range(cfg.max_steps):
+                # 1. Select an action.
+                action = agent.select_action(obs)
 
-            truncated = (step == cfg.max_steps - 1) and not done
-            episode_finished = done or truncated
+                # 2. Advance the environment.
+                next_obs, reward, done, info = env.step(action)
 
-            buffer.push(
-                obs,
-                action,
-                reward,
-                next_obs,
-                episode_finished
-            )
+                # The trainer may end an episode when the step limit
+                # is reached, even if the environment has not terminated.
+                truncated = (
+                    step == cfg.max_steps - 1 and not done
+                )
+                episode_finished = done or truncated
 
-            obs = next_obs
-            ep_reward += reward
-            global_step += 1
+                # 3. Store the transition.
+                # Mark truncations as finished so the next episode's
+                # initial state is not treated as this transition's future.
+                buffer.push(
+                    obs,
+                    action,
+                    reward,
+                    next_obs,
+                    episode_finished,
+                )
 
-            if len(buffer) >= cfg.warmup_steps:
-                if global_step % cfg.train_every == 0:
+                obs = next_obs
+                ep_reward += float(reward)
+                global_step += 1
+
+                # 4. Update the agent once enough data is available.
+                if (
+                    len(buffer) >= cfg.warmup_steps
+                    and global_step % cfg.train_every == 0
+                ):
                     batch = buffer.sample(cfg.batch_size)
-                    ep_loss_sum += agent.update(batch)
+                    loss = agent.update(batch)
+
+                    ep_loss_sum += float(loss)
                     ep_loss_count += 1
 
-            if episode_finished:
-                break
+                if episode_finished:
+                    break
 
-        
-        # Decay exploration rate at the end of the episode
-        agent.end_episode()
+            # 5. Decay exploration after each episode.
+            agent.end_episode()
 
-        # Bookkeeping 
-        success = 1 if info.get("status") == EpisodeStatus.LANDED.value else 0
-        recent_rewards.append(ep_reward)
-        recent_success.append(success)
-        if len(recent_rewards) > 100:
-            recent_rewards.pop(0)
-            recent_success.pop(0)
+            # 6. Record episode metrics.
+            status = info.get("status", "unknown")
 
-        history["episode"].append(ep)
-        history["reward"].append(ep_reward)
-        history["steps"].append(env.steps)
-        history["status"].append(info.get("status", "unknown"))
-        history["epsilon"].append(agent.epsilon)
-        history["loss"].append(ep_loss_sum / max(1, ep_loss_count))
-        history["success"].append(success)
+            if truncated and not done:
+                status = "truncated"
 
-        # Periodic logging
-        if ep % cfg.log_every == 0 or ep == 1:
-            avg_r = float(np.mean(recent_rewards))
-            avg_s = float(np.mean(recent_success))
-            elapsed = time.time() - t0
-            print(
-                f"ep {ep:5d} | avg100 reward {avg_r:8.2f} | "
-                f"success {avg_s:6.2%} | eps {agent.epsilon:.3f} | "
-                f"steps {env.steps:4d} | {elapsed:6.1f}s"
+            success = int(
+                info.get("status") == EpisodeStatus.LANDED.value
             )
 
-        # Periodic save
-        if ep % cfg.save_every == 0:
-            agent.save(str(models_dir / "dqn_latest.pt"))
+            recent_rewards.append(ep_reward)
+            recent_success.append(success)
 
-    # Final save + history dump
-    agent.save(str(models_dir / "dqn_final.pt"))
-    with open(run_dir / "training_history.json", "w") as f:
-        json.dump(history, f, indent=2)
+            if len(recent_rewards) > 100:
+                recent_rewards.pop(0)
+                recent_success.pop(0)
 
-    print(f"\nTraining complete in {time.time() - t0:.1f}s")
-    print(f"Checkpoints in {models_dir}/")
-    print(f"History in {run_dir}/training_history.json")
+            history["episode"].append(ep)
+            history["reward"].append(float(ep_reward))
+            history["steps"].append(int(env.steps))
+            history["status"].append(status)
+            history["truncated"].append(bool(truncated))
+            history["epsilon"].append(float(agent.epsilon))
+            history["loss"].append(
+                ep_loss_sum / ep_loss_count
+                if ep_loss_count > 0
+                else 0.0
+            )
+            history["success"].append(success)
+
+            # 7. Log progress.
+            if ep % cfg.log_every == 0 or ep == 1:
+                avg_reward = float(np.mean(recent_rewards))
+                avg_success = float(np.mean(recent_success))
+                elapsed = time.time() - start_time
+
+                print(
+                    f"Episode {ep:5d} | "
+                    f"Avg100 reward {avg_reward:8.2f} | "
+                    f"Success {avg_success:6.2%} | "
+                    f"Epsilon {agent.epsilon:.3f} | "
+                    f"Steps {env.steps:4d} | "
+                    f"Loss {history['loss'][-1]:.4f} | "
+                    f"Time {elapsed:6.1f}s"
+                )
+
+            # 8. Save checkpoints and metrics together.
+            if ep % cfg.save_every == 0:
+                agent.save(str(models_dir / "dqn_latest.pt"))
+                save_history()
+
+    except KeyboardInterrupt:
+        print("\nTraining interrupted. Saving current progress...")
+
+    finally:
+        # Save the latest model and metrics even after interruption.
+        agent.save(str(models_dir / "dqn_latest.pt"))
+        save_history()
+
+    # Save a separate final checkpoint only after all episodes finish.
+    completed_all_episodes = len(history["episode"]) == cfg.episodes
+
+    if completed_all_episodes:
+        agent.save(str(models_dir / "dqn_final.pt"))
+
+    elapsed = time.time() - start_time
+
+    print(f"\nTraining stopped after {len(history['episode'])} episodes.")
+    print(f"Elapsed time: {elapsed:.1f}s")
+    print(f"Checkpoints: {models_dir}/")
+    print(f"History: {history_path}")
+
     return history
