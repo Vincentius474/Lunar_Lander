@@ -41,7 +41,6 @@ def test_wraparound_preserves_recent_data():
     assert stored == [2.0, 3.0, 4.0]
 
 def test_sample_is_with_replacement():
-    """DQN samples uniformly with replacement; duplicates are expected."""
     buf = ReplayBuffer(capacity=10, obs_dim=1, seed=0)
     for i in range(10):
         buf.push(

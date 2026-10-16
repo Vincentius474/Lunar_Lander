@@ -56,13 +56,40 @@ class LanderEnv:
         self.reset()
 
     # Terrain
+    # def _make_terrain(self) -> np.ndarray:
+    #     """Stable, gently uneven terrain; flat section under the landing pad."""
+    #     xs = np.linspace(0, self.config.width, 17)
+    #     ys = self.config.terrain_height + self.rng.integers(-24, 25, size=len(xs))
+    #     pad_mask = (xs >= self.config.landing_pad_left) & (xs <= self.config.landing_pad_right)
+    #     ys[pad_mask] = self.config.terrain_height
+    #     ys[0] = ys[-1] = self.config.terrain_height + 25
+    #     return np.column_stack((xs, ys)).astype(float)
+    
     def _make_terrain(self) -> np.ndarray:
-        """Stable, gently uneven terrain; flat section under the landing pad."""
-        xs = np.linspace(0, self.config.width, 17)
-        ys = self.config.terrain_height + self.rng.integers(-24, 25, size=len(xs))
-        pad_mask = (xs >= self.config.landing_pad_left) & (xs <= self.config.landing_pad_right)
-        ys[pad_mask] = self.config.terrain_height
-        ys[0] = ys[-1] = self.config.terrain_height + 25
+        """Generate terrain with an exactly flat landing pad."""
+        c = self.config
+
+        # Include the pad boundaries as explicit terrain vertices.
+        xs = np.unique(np.concatenate([
+            np.linspace(0, c.width, 17),
+            np.array([c.landing_pad_left, c.landing_pad_right]),
+        ]))
+
+        ys = c.terrain_height + self.rng.integers(
+            -24, 25, size=len(xs)
+        )
+
+        # Keep the entire pad perfectly flat.
+        pad_mask = (
+            (xs >= c.landing_pad_left)
+            & (xs <= c.landing_pad_right)
+        )
+        ys[pad_mask] = c.terrain_height
+
+        # Keep the terrain edges slightly elevated.
+        ys[0] = c.terrain_height + 25
+        ys[-1] = c.terrain_height + 25
+
         return np.column_stack((xs, ys)).astype(float)
 
     # Gym-like API
@@ -117,7 +144,18 @@ class LanderEnv:
         acceleration = np.array([0.0, c.gravity], dtype=float)
 
         # Base step reward: a small time penalty to encourage efficiency
-        reward = -0.01
+        # reward = -0.01
+
+        # save previous state
+        previous_position = self.position.copy()
+        previous_velocity = self.velocity.copy()
+        previous_angle = self.angle
+        previous_angular_velocity = self.angular_velocity
+        previous_potential = self._potential()
+
+        reward += 2.0 * (
+            self._potential() - previous_potential
+        )
 
         if action == Action.MAIN_ENGINE and self.fuel > 0:
             acceleration[0] += math.sin(self.angle) * c.main_thrust
@@ -195,10 +233,9 @@ class LanderEnv:
                 "status": self.status.value,
                 "fuel": self.fuel,
                 "steps": self.steps,
-                "total_reward": self.total_reward,
-            },
+                "total_reward": self.total_reward
+            }
         )
-
 
     # Helpers
     def _terrain_y(self, x: float) -> float:
@@ -213,5 +250,28 @@ class LanderEnv:
             "fuel": self.fuel,
             "status": self.status.value,
             "steps": self.steps,
-            "total_reward": self.total_reward,
+            "total_reward": self.total_reward
         }
+
+    def _potential(self) -> float:
+        """Higher potential means a more promising landing state."""
+        c = self.config
+        pad_center = (
+            c.landing_pad_left + c.landing_pad_right
+        ) / 2
+
+        dx = (self.position[0] - pad_center) / c.width
+        vx = self.velocity[0] / 60.0
+        vy = max(0.0, self.velocity[1]) / 60.0
+
+        # Angle is already wrapped to [-pi, pi].
+        angle_error = abs(self.angle) / math.pi
+        angular_speed = abs(self.angular_velocity) / 4.0
+
+        return (
+            -1.5 * abs(dx)
+            -0.5 * abs(vx)
+            -0.8 * vy
+            -0.5 * angle_error
+            -0.2 * angular_speed
+        )

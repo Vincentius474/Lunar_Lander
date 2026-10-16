@@ -59,7 +59,6 @@ def _draw_lander(screen, env, thrusting: bool) -> None:
     wc = _rotate_and_translate(LANDER_WINDOW, cx, cy, angle)[0]
     pygame.draw.circle(screen, CYAN, wc, 3)
 
-
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--model", type=str, default="models/dqn_final.pt")

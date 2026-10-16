@@ -14,35 +14,34 @@ from .replay_buffer import ReplayBuffer
 Training loop for the DQN lander agent.
 """
 
+
 @dataclass
 class TrainConfig:
-    """
-    Hyperparameters and run settings.
-    """
-
     # Environment
     env_seed: int = 0
 
     # Training loop
-    episodes: int = 1500
+    episodes: int = 2500
     max_steps: int = 1000
 
     # Replay / updates
     batch_size: int = 64
-    buffer_size: int = 100_000
-    warmup_steps: int = 8000          # collect this many transitions before learning
-    train_every: int = 1              # gradient steps per env step
+    buffer_size: int = 50_000
+    warmup_steps: int = 2000
+    train_every: int = 1
 
     # Optimizer / RL
-    lr: float = 1e-3
+    lr: float = 1e-4
     gamma: float = 0.99
     hidden: int = 128
 
     # Exploration
     epsilon_start: float = 1.0
-    epsilon_end: float = 0.1
-    epsilon_decay: float = 0.995
-    target_update: int = 500
+    epsilon_end: float = 0.05
+    epsilon_decay: float = 0.999
+
+    # Target network
+    target_update: int = 1000
 
     # Logging / saving
     seed: int = 0
@@ -50,7 +49,6 @@ class TrainConfig:
     save_every: int = 100
     out_dir: str = "results"
     models_dir: str = "models"
-
 
 def train(cfg: TrainConfig) -> dict:
     """
@@ -82,7 +80,7 @@ def train(cfg: TrainConfig) -> dict:
         epsilon_end=cfg.epsilon_end,
         epsilon_decay=cfg.epsilon_decay,
         target_update=cfg.target_update,
-        seed=cfg.seed,
+        seed=cfg.seed
     )
     buffer = ReplayBuffer(capacity=cfg.buffer_size, obs_dim=obs_dim, seed=cfg.seed)
 
@@ -110,27 +108,39 @@ def train(cfg: TrainConfig) -> dict:
         ep_loss_count = 0
         info: dict = {}
 
-        for _ in range(cfg.max_steps):
+        for step in range(cfg.max_steps):
             # 1) Pick an action
             action = agent.select_action(obs)
 
-            # 2) Interact with the environment
+
+            # The environment can terminate naturally, or the trainer
+            # can truncate the episode at max_steps.
             next_obs, reward, done, info = env.step(action)
 
-            # 3) Store the transition
-            buffer.push(obs, action, reward, next_obs, done)
+            truncated = (step == cfg.max_steps - 1) and not done
+            episode_finished = done or truncated
+
+            buffer.push(
+                obs,
+                action,
+                reward,
+                next_obs,
+                episode_finished
+            )
+
             obs = next_obs
             ep_reward += reward
             global_step += 1
 
-            # 4) Learn (once we have enough warmup data)
-            if len(buffer) >= cfg.warmup_steps and global_step % cfg.train_every == 0:
-                batch = buffer.sample(cfg.batch_size)
-                ep_loss_sum += agent.update(batch)
-                ep_loss_count += 1
+            if len(buffer) >= cfg.warmup_steps:
+                if global_step % cfg.train_every == 0:
+                    batch = buffer.sample(cfg.batch_size)
+                    ep_loss_sum += agent.update(batch)
+                    ep_loss_count += 1
 
-            if done:
+            if episode_finished:
                 break
+
         
         # Decay exploration rate at the end of the episode
         agent.end_episode()

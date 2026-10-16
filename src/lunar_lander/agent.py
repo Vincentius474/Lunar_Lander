@@ -1,4 +1,5 @@
 from __future__ import annotations
+from random import seed
 import numpy as np
 import torch
 import torch.nn as nn
@@ -20,9 +21,10 @@ class DQNAgent:
       - epsilon: probability of taking a random action (exploration)
     """
 
-    def __init__(self, obs_dim: int = 9, n_actions: int = 6, hidden: int = 128, lr: float = 1e-3, gamma: float = 0.99, 
-        epsilon_start: float = 1.0, epsilon_end: float = 0.05, epsilon_decay: float = 0.995, 
+    def __init__(self, obs_dim: int = 9, n_actions: int = 6, hidden: int = 128, lr: float = 1e-4, gamma: float = 0.99, 
+        epsilon_start: float = 1.0, epsilon_end: float = 0.05, epsilon_decay: float = 0.999, 
         target_update: int = 500, device: str = "cpu", seed: int | None = None):
+
         self.obs_dim = obs_dim
         self.n_actions = n_actions
 
@@ -35,7 +37,9 @@ class DQNAgent:
         self.device = torch.device(device)
 
         self.rng = np.random.default_rng(seed)
-        torch.manual_seed(seed or 0)
+        # torch.manual_seed(seed or 0)
+        if seed is not None:
+            torch.manual_seed(seed)
 
         # Two identical networks, target is never trained by the optimizer
         self.online = QNetwork(obs_dim, n_actions, hidden).to(self.device)
@@ -51,7 +55,10 @@ class DQNAgent:
 
     # Action selection
     def select_action(self, obs: np.ndarray, greedy: bool = False) -> int:
-        """Epsilon-greedy action. `greedy=True` disables exploration (eval)."""
+        """
+        Epsilon-greedy action. 
+        greedy=True disables exploration (eval).
+        """
         if not greedy and self.rng.random() < self.epsilon:
             return int(self.rng.integers(self.n_actions))
         with torch.no_grad():
@@ -60,38 +67,81 @@ class DQNAgent:
             return int(q.argmax(dim=1).item())
 
     # Learning step
+    # def update(self, batch) -> float:
+    #     """
+    #     One gradient step. Returns the loss as a float for logging.
+    #     batch: tuple of (obs, actions, rewards, next_obs, dones)
+    #     """
+    #     obs, actions, rewards, next_obs, dones = batch
+
+    #     obs = torch.as_tensor(obs, device=self.device)
+    #     actions = torch.as_tensor(actions, device=self.device)
+    #     rewards = torch.as_tensor(rewards, device=self.device)
+    #     next_obs = torch.as_tensor(next_obs, device=self.device)
+    #     dones = torch.as_tensor(dones, device=self.device)
+
+    #     # Q(s, a) for the actions we actually took
+    #     q_values = self.online(obs).gather(1, actions.unsqueeze(1)).squeeze(1)
+
+    #     # TD target: r + γ * max_a' Q_target(s', a')  (zeroed if done)
+    #     with torch.no_grad():
+    #         next_q = self.target(next_obs).max(dim=1).values
+    #         targets = rewards + self.gamma * next_q * (1.0 - dones)
+
+    #     loss = self.loss_fn(q_values, targets)
+    #     self.optimizer.zero_grad()
+    #     loss.backward()
+
+    #     # Clip gradients: DQN sometimes produces huge gradients on a bad batch.
+    #     nn.utils.clip_grad_norm_(self.online.parameters(), max_norm=10.0)
+    #     self.optimizer.step()
+
+    #     # Every target_update steps, copy online > target.
+    #     self.steps += 1
+    #     if self.steps % self.target_update == 0:
+    #         self.target.load_state_dict(self.online.state_dict())
+
+    #     return float(loss.item())
+
     def update(self, batch) -> float:
-        """One gradient step. Returns the loss as a float for logging."""
+        """Perform one Double DQN gradient update."""
+
         obs, actions, rewards, next_obs, dones = batch
 
-        obs = torch.as_tensor(obs, device=self.device)
-        actions = torch.as_tensor(actions, device=self.device)
-        rewards = torch.as_tensor(rewards, device=self.device)
-        next_obs = torch.as_tensor(next_obs, device=self.device)
-        dones = torch.as_tensor(dones, device=self.device)
+        # Explicit types and shapes prevent accidental dtype/shape issues.
+        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        actions = torch.as_tensor(actions, dtype=torch.long, device=self.device).view(-1)
+        rewards = torch.as_tensor(rewards, dtype=torch.float32, device=self.device).view(-1)
+        next_obs = torch.as_tensor(next_obs, dtype=torch.float32, device=self.device)
+        dones = torch.as_tensor(dones, dtype=torch.float32, device=self.device).view(-1)
 
-        # Q(s, a) for the actions we actually took
-        q_values = self.online(obs).gather(1, actions.unsqueeze(1)).squeeze(1)
+        # Q-values for the actions actually taken.
+        current_q = self.online(obs).gather(1, actions.unsqueeze(1)).squeeze(1)
 
-        # TD target: r + γ * max_a' Q_target(s', a')  (zeroed if done)
         with torch.no_grad():
-            next_q = self.target(next_obs).max(dim=1).values
+            # Online network selects the next action.
+            next_actions = self.online(next_obs).argmax(dim=1, keepdim=True)
+
+            # Target network evaluates that selected action.
+            next_q = self.target(next_obs).gather(1, next_actions).squeeze(1)
+
             targets = rewards + self.gamma * next_q * (1.0 - dones)
 
-        loss = self.loss_fn(q_values, targets)
-        self.optimizer.zero_grad()
+        loss = self.loss_fn(current_q, targets)
+        self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
 
-        # Clip gradients: DQN sometimes produces huge gradients on a bad batch.
-        nn.utils.clip_grad_norm_(self.online.parameters(), max_norm=10.0)
+        nn.utils.clip_grad_norm_(
+            self.online.parameters(), max_norm=10.0
+        )
         self.optimizer.step()
-
-        # Every target_update steps, copy online > target.
         self.steps += 1
+
         if self.steps % self.target_update == 0:
             self.target.load_state_dict(self.online.state_dict())
 
-        return float(loss.item())
+        return loss.item()
+
 
     def end_episode(self) -> None:
         """
